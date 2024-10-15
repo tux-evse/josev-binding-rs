@@ -21,7 +21,7 @@ use typesv4::prelude::*;
 pub struct ApiUserData {
     iec_api: &'static str,
     meter_api: &'static str,
-    meter_max_period_ms: i32
+    meter_max_period_ms: i32,
 }
 
 impl AfbApiControls for ApiUserData {
@@ -40,6 +40,7 @@ impl AfbApiControls for ApiUserData {
         // FIXME ?
         let subscribed_messages = JsoncObj::array();
         subscribed_messages.append("iso15118_state_info")?;
+        subscribed_messages.append("hlc_charging")?;
         AfbSubCall::call_sync(api, "from_mqtt", "subscribe_events", subscribed_messages)?;
         Ok(())
     }
@@ -79,10 +80,11 @@ struct SharedContext {
     shared: Arc<RwLock<Context>>,
 }
 
-fn iec_event_cb(_evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Result<(), AfbError> {
+fn iec_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Result<(), AfbError> {
     let ctx: &mut SharedContext = ctx.get_mut::<SharedContext>()?;
 
     let msg = args.get::<&Iec6185Msg>(0)?;
+    afb_log_msg!(Debug, evt.get_apiv4(), "IEC event received {:?}", msg);
 
     {
         let mut ctx = ctx.shared.write().unwrap();
@@ -152,7 +154,10 @@ fn energy_event_cb(
         let mut ctx = ctx.shared.write().unwrap();
         match data.tag {
             MeterTagSet::Tension => {
-                println!("tension {}", data.total);
+                afb_log_msg!(Debug, _evt.get_apiv4(), "Received tension {}", data.total);
+            }
+            MeterTagSet::Current => {
+                afb_log_msg!(Debug, _evt.get_apiv4(), "Received current {}", data.total);
             }
             _ => {}
         }
@@ -197,35 +202,58 @@ fn mqtt_event_cb(_evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Res
                 status: josev::AuthorizationStatus::Accepted,
                 id_token: Some("1234".to_owned()),
             });
+
+            /*ctx.cp_status_event.push(josev::CpStatusUpdate {
+                evse_id: ctx.cs_parameters.parameters[0].evse_id.clone(),
+                connector_id: ctx.cs_parameters.parameters[0].connectors[0].id,
+                state: ctx.charging_state,
+                max_voltage: None,
+                min_voltage: None,
+                duty_cycle: None,
+            });*/
         }
     }
     Ok(())
 }
 
-fn on_cable_check(
-    request: &AfbRequest,
-    args: &AfbRqtData,
-    ctx: &AfbCtxData,
-) -> Result<(), AfbError> {
-    let arg: &josev::CableCheckRequest = args.get::<&josev::CableCheckRequest>(0)?;
+struct IgnoreRspCtx {}
+
+fn ignore_rsp_cb(_api: &AfbApi, _args: &AfbRqtData, _ctx: &AfbCtxData) -> Result<(), AfbError> {
+    let _ctx = _ctx.get_ref::<IgnoreRspCtx>()?;
+
+    Ok(())
+}
+
+fn on_hlc_charging(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Result<(), AfbError> {
+    let msg = args.get::<JsoncObj>(0)?;
     let ctx: &SharedContext = ctx.get_ref::<SharedContext>()?;
+    let config = &ctx.config;
 
-    let response = {
-        let ctx = ctx.shared.read().unwrap();
+    // Always authorize the session
+    if let Ok(evse_id) = msg.get::<&'static str>("evse_id") {
+        if let Ok(status) = msg.get::<bool>("status") {
+            if status {
+                let ctx = ctx.shared.write().unwrap();
 
-        if ctx.cs_parameters.parameters[0].evse_id != arg.evse_id {
-            // ignore requests for another EVSE ID
-            return Ok(());
+                if ctx.cs_parameters.parameters[0].evse_id != evse_id {
+                    // ignore messages of other EVSE IDs
+                    return Ok(());
+                }
+                // Close the contactor
+                println!("======== IEC API {}", config.iec_api);
+                AfbSubCall::call_async(evt.get_apiv4(), config.iec_api, "power", true, ignore_rsp_cb, IgnoreRspCtx{})?;
+
+                ctx.cp_status_event.push(josev::CpStatusUpdate {
+                    evse_id: ctx.cs_parameters.parameters[0].evse_id.clone(),
+                    connector_id: ctx.cs_parameters.parameters[0].connectors[0].id,
+                    state: ctx.charging_state,
+                    max_voltage: None,
+                    min_voltage: None,
+                    duty_cycle: None,
+                });
+            }
         }
-
-        josev::CableCheckResponse {
-            evse_id: arg.evse_id.clone(),
-            cable_check_status: josev::CableCheckStatus::Finished,
-            isolation_level: Some(josev::IsolationLevel::Valid),
-        }
-    };
-
-    request.reply(response, 0);
+    }
     Ok(())
 }
 
@@ -262,40 +290,12 @@ fn on_contactor_status(
     Ok(())
 }
 
-fn on_power_electronics_setpoint(
-    request: &AfbRequest,
-    args: &AfbRqtData,
-    ctx: &AfbCtxData,
-) -> Result<(), AfbError> {
-    let arg: &josev::PowerElectronicsSetpointRequest =
-        args.get::<&josev::PowerElectronicsSetpointRequest>(0)?;
-    let ctx: &mut SharedContext = ctx.get_mut::<SharedContext>()?;
-
-    // Set present_voltage and present_current to the ones asked for
-    {
-        let mut ctx = ctx.shared.write().unwrap();
-        let limits = &mut ctx.cs_status_and_limits.evses[0];
-        limits
-            .dc
-            .as_mut()
-            .map(|x| x.present_voltage = arg.dc.as_ref().unwrap().voltage);
-    }
-
-    // Always accept set point
-    let response = josev::PowerElectronicsSetpointResponse {
-        evse_id: arg.evse_id.clone(),
-        status: josev::SetPointRequestStatus::Accepted,
-    };
-    request.reply(response, 0);
-    Ok(())
-}
-
 fn on_status_and_limits(
     request: &AfbRequest,
     _args: &AfbRqtData,
     ctx: &AfbCtxData,
 ) -> Result<(), AfbError> {
-    println!("***** CS STATUS AND LIMITS");
+    afb_log_msg!(Debug, request.get_apiv4(), "CS STATUS AND LIMITS");
     let ctx = ctx.get_ref::<SharedContext>()?;
     let ctx = ctx.shared.read().unwrap();
     request.reply(ctx.cs_status_and_limits.clone(), 0);
@@ -307,7 +307,7 @@ fn on_cs_parameters(
     _args: &AfbRqtData,
     ctx: &AfbCtxData,
 ) -> Result<(), AfbError> {
-    println!("***** CS PARAMETERS");
+    afb_log_msg!(Debug, request.get_apiv4(), "CS PARAMETERS");
     let ctx = ctx.get_ref::<SharedContext>()?;
     let ctx = ctx.shared.read().unwrap();
     request.reply(ctx.cs_parameters.clone(), 0);
@@ -355,7 +355,7 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
     let authorization_event = AfbEvent::new("authorization");
     let contactor_status_event = AfbEvent::new("cs_constactor_status");
 
-    let charging_state = josev::ControlPilotState::A1;
+    let charging_state = josev::ControlPilotState::C2;
 
     let meter_max_period_ms: i32 = {
         if let Ok(value) = jconf.get("meter_max_period_ms") {
@@ -365,7 +365,11 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
         }
     };
 
-    let config = ApiUserData { iec_api, meter_api, meter_max_period_ms };
+    let config = ApiUserData {
+        iec_api,
+        meter_api,
+        meter_max_period_ms,
+    };
 
     let api = AfbApi::new(JOSEV_API).set_callback(Box::new(config.clone()));
 
@@ -405,6 +409,12 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
         .set_context(shared_context.clone())
         .finalize()?;
 
+    let hlc_charging_handler = AfbEvtHandler::new("hlc-charging-evt")
+        .set_pattern(to_static_str("from_mqtt/event/hlc_charging".to_owned()))
+        .set_callback(on_hlc_charging)
+        .set_context(shared_context.clone())
+        .finalize()?;
+
     let energy_evt_handler = AfbEvtHandler::new("energy-evt-handler")
         .set_pattern(to_static_str(format!("{}/*", meter_api)))
         .set_callback(energy_event_cb)
@@ -415,19 +425,8 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
     // Verbs called by Josev
     //
 
-    // For DC charge
-    let cable_check_verb = AfbVerb::new("cable_check")
-        .set_callback(on_cable_check)
-        .set_context(shared_context.clone())
-        .finalize()?;
-
     let contactor_status_verb = AfbVerb::new("cs_contactor_status")
         .set_callback(on_contactor_status)
-        .set_context(shared_context.clone())
-        .finalize()?;
-
-    let electronics_setpoint_verb = AfbVerb::new("power_electronics_setpoint")
-        .set_callback(on_power_electronics_setpoint)
         .set_context(shared_context.clone())
         .finalize()?;
 
@@ -448,10 +447,9 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
     api.add_verb(subscribe_verb);
     api.add_evt_handler(mqtt_handler);
     api.add_evt_handler(energy_evt_handler);
+    api.add_evt_handler(hlc_charging_handler);
 
-    api.add_verb(cable_check_verb);
     api.add_verb(contactor_status_verb);
-    api.add_verb(electronics_setpoint_verb);
     api.add_verb(status_and_limits_verb);
     api.add_verb(cs_parameters_verb);
 
