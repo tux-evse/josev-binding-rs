@@ -20,8 +20,11 @@ use typesv4::prelude::*;
 #[derive(Clone)]
 pub struct ApiUserData {
     charge_api: &'static str,
+    auth_api: &'static str,
     meter_api: &'static str,
     meter_max_period_ms: i32,
+
+    evse_id: String,
 }
 
 impl AfbApiControls for ApiUserData {
@@ -36,8 +39,16 @@ impl AfbApiControls for ApiUserData {
         AfbSubCall::call_sync(api, self.meter_api, "tension", EnergyAction::SUBSCRIBE)?;
         AfbSubCall::call_sync(api, self.meter_api, "current", EnergyAction::SUBSCRIBE)?;
 
+        // Reset authentication
+        if let Err(err) = AfbSubCall::call_sync(api, self.auth_api, "logout", 0) {
+            afb_log_msg!(
+                Notice,
+                api.get_apiv4(),
+                "**logout failed**, probably already logged out"
+            );
+        }
+
         // Subscribe to MQTT iso15118_state_info (for authorization)
-        // FIXME ?
         let subscribed_messages = JsoncObj::array();
         subscribed_messages.append("iso15118_state_info")?;
         subscribed_messages.append("hlc_charging")?;
@@ -93,12 +104,12 @@ fn charge_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Re
                 match *plugged {
                     PlugState::PlugIn => {
                         ctx.charging_state = josev::ControlPilotState::B1;
-                    },
+                    }
                     PlugState::Lock => {
                         ctx.charging_state = josev::ControlPilotState::C2;
-                    },
+                    }
                     _ => {
-                        ctx.charging_state = josev::ControlPilotState::A1;                        
+                        ctx.charging_state = josev::ControlPilotState::A1;
                     }
                 }
 
@@ -110,29 +121,29 @@ fn charge_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Re
                     min_voltage: None,
                     duty_cycle: None,
                 });
-            },
+            }
             ChargingMsg::Power(power_state) => {
                 match *power_state {
                     PowerRequest::Start | PowerRequest::Charging(_) => {
                         ctx.contactor_closed = true;
-                    },
+                    }
                     PowerRequest::Stop(_) => {
                         ctx.contactor_closed = false;
-                    },
+                    }
                     _ => {}
                 }
                 ctx.contactor_status_event
-                .push(josev::CsContactorStatusUpdate {
-                    evse_id: ctx.cs_parameters.parameters[0].evse_id.clone(),
-                    status: {
-                        if ctx.contactor_closed {
-                            josev::CsContactorStatusResponseStatus::Closed
-                        } else {
-                            josev::CsContactorStatusResponseStatus::Opened
-                        }
-                    },
-                    info: None,
-                });
+                    .push(josev::CsContactorStatusUpdate {
+                        evse_id: ctx.cs_parameters.parameters[0].evse_id.clone(),
+                        status: {
+                            if ctx.contactor_closed {
+                                josev::CsContactorStatusResponseStatus::Closed
+                            } else {
+                                josev::CsContactorStatusResponseStatus::Opened
+                            }
+                        },
+                        info: None,
+                    });
             }
             _ => {}
         }
@@ -201,21 +212,40 @@ fn on_subscribe(
 fn mqtt_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Result<(), AfbError> {
     let msg = args.get::<JsoncObj>(0)?;
     let ctx: &SharedContext = ctx.get_ref::<SharedContext>()?;
+    let config = &ctx.config;
+
+    let evse_id = msg.get::<&'static str>("evse_id")?;
+
+    // ignore other EVSE IDs
+    if ctx.config.evse_id != evse_id {
+        return Ok(());
+    }
 
     // Always authorize the session
     if let Ok(session_status) = msg.get::<&'static str>("session_status") {
         if session_status == "Authorization" {
             let ctx = ctx.shared.read().unwrap();
-            ctx.authorization_event.push(josev::AuthorizationUpdate {
-                evse_id: msg.get::<&'static str>("evse_id")?.to_string(),
-                token_type: josev::AuthorizationTokenType::KeyCode,
-                status: josev::AuthorizationStatus::Accepted,
-                id_token: Some("1234".to_owned()),
-            });
-        }
-        else if session_status == "SessionStop" {
+
+            // Ask for authorization
+            let auth_reply =
+                AfbSubCall::call_sync(evt.get_apiv4(), config.auth_api, "login", false)?;
+            let auth_state: &AuthState = auth_reply.get_onsuccess::<&AuthState>(0)?;
+            if matches!(auth_state.auth, AuthMsg::Done) {
+                ctx.authorization_event.push(josev::AuthorizationUpdate {
+                    evse_id: evse_id.to_string(),
+                    token_type: josev::AuthorizationTokenType::KeyCode,
+                    status: josev::AuthorizationStatus::Accepted,
+                    id_token: Some(auth_state.tagid.clone()),
+                });
+            }
+        } else if session_status == "SessionStop" {
             // Open the contactor
-            AfbSubCall::call_sync(evt.get_apiv4(), ctx.config.charge_api, "remote_power", false)?;
+            AfbSubCall::call_sync(
+                evt.get_apiv4(),
+                ctx.config.charge_api,
+                "remote_power",
+                false,
+            )?;
         }
     }
     Ok(())
@@ -229,16 +259,15 @@ fn on_hlc_charging(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Re
     // Always authorize the session
     if let Ok(evse_id) = msg.get::<&'static str>("evse_id") {
         if let Ok(status) = msg.get::<bool>("status") {
-            if status {
+            if config.evse_id != evse_id {
+                // ignore messages of other EVSE IDs
+                return Ok(());
+            }
+            // Close the contactor
+            AfbSubCall::call_sync(evt.get_apiv4(), config.charge_api, "remote_power", status)?;
+
+            {
                 let ctx = ctx.shared.write().unwrap();
-
-                if ctx.cs_parameters.parameters[0].evse_id != evse_id {
-                    // ignore messages of other EVSE IDs
-                    return Ok(());
-                }
-                // Close the contactor
-                AfbSubCall::call_sync(evt.get_apiv4(), config.charge_api, "remote_power", true)?;
-
                 ctx.cp_status_event.push(josev::CpStatusUpdate {
                     evse_id: ctx.cs_parameters.parameters[0].evse_id.clone(),
                     connector_id: ctx.cs_parameters.parameters[0].connectors[0].id,
@@ -347,6 +376,7 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
 
     let charge_api = jconf.get::<&'static str>("charge_api")?;
     let meter_api = jconf.get::<&'static str>("meter_api")?;
+    let auth_api = jconf.get::<&'static str>("auth_api")?;
 
     let cp_status_event = AfbEvent::new("cp_status");
     let authorization_event = AfbEvent::new("authorization");
@@ -362,10 +392,15 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
         }
     };
 
+    // copy evse_id as immutable configuration
+    let evse_id = cs_parameters.parameters[0].evse_id.clone();
+
     let config = ApiUserData {
         charge_api,
+        auth_api,
         meter_api,
         meter_max_period_ms,
+        evse_id,
     };
 
     let api = AfbApi::new(JOSEV_API).set_callback(Box::new(config.clone()));
@@ -386,6 +421,7 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
 
     api.require_api(charge_api);
     api.require_api(meter_api);
+    api.require_api(auth_api);
 
     let charge_handler = AfbEvtHandler::new("charge-evt")
         .set_pattern(to_static_str(format!("{}/*", charge_api)))
