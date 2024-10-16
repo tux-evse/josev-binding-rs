@@ -382,7 +382,7 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
     let authorization_event = AfbEvent::new("authorization");
     let contactor_status_event = AfbEvent::new("cs_contactor_status");
 
-    let charging_state = josev::ControlPilotState::C2;
+    let charging_state = josev::ControlPilotState::A1;
 
     let meter_max_period_ms: i32 = {
         if let Ok(value) = jconf.get("meter_max_period_ms") {
