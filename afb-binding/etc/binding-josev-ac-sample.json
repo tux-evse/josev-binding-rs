@@ -1,54 +1,54 @@
 {
-    "binding": [
-        {
-            "uid": "josev",
-            "api": "josev",
-            "path": "libafb_josev.so",
-            "info": "set/get api",
-            "iec_api": "iec_stub",
-            "meter_api": "engy_stub",
-            "verbosity": 9,
-            "cs_parameters": {
-                "sw_version": "v1.0.1",
-                "hw_version": "v2.0.0",
-                "number_of_evses": 1,
-                "parameters": [
-                    {
-                        "evse_id": "DE*PNX*E12345*1",
-                        "connectors": [
-                            {
-                                "id": 1,
-                                "services": {
-                                    "ac": {
-                                        "connector_type": "AC_three_phase_core",
-                                        "nominal_voltage": 230,
-                                        "control_mode": "dynamic"
-                                    }
-                                }
-                            }
-                        ],
-                        "supports_eim": false,
-                        "network_interface": "evse-veth"
-                    }
-                ]
-            },
-            "cs_status_and_limits": {
-                "evses": [
-                    {
-                        "evse_id": "DE*PNX*E12345*1",
-                        "status_code": "evse_ready",
-                        "ac": {
-                            "max_current": {
-                                "l1": 16,
-                                "l2": 16,
-                                "l3": 16
-                            },
-                            "nominal_voltage": 230,
-                            "rcd_error": false
-                        }
-                    }
-                ]
+  "set": {
+    "libafb_josev.so": {
+      "uid": "josev",
+      "api": "josev",
+      "info": "set/get api",
+      "charge_api": "chmgr",
+      "meter_api": "engy",
+      "auth_api": "auth",
+      "verbosity": 9,
+      "cs_parameters": {
+        "sw_version": "v1.0.1",
+        "hw_version": "v2.0.0",
+        "number_of_evses": 1,
+        "parameters": [
+          {
+            "evse_id": "DE*PNX*E12345*1",
+            "connectors": [
+              {
+                "id": 1,
+                "services": {
+                  "ac": {
+                    "connector_type": "AC_three_phase_core",
+                    "nominal_voltage": 230,
+                    "control_mode": "dynamic"
+                  }
+                }
+              }
+            ],
+            "supports_eim": true,
+            "network_interface": "${ISO2_IFACE}"
+          }
+        ]
+      },
+      "cs_status_and_limits": {
+        "evses": [
+          {
+            "evse_id": "DE*PNX*E12345*1",
+            "status_code": "evse_ready",
+            "ac": {
+              "max_current": {
+                "l1": 32,
+                "l2": 32,
+                "l3": 32
+              },
+              "nominal_voltage": 230,
+              "rcd_error": false
             }
-        }
-    ]
+          }
+        ]
+      }
+    }
+  }
 }
