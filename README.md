@@ -22,7 +22,7 @@ Charging station parameters are stored in the `cs_parameters` configuration key 
 
 **Limitation**: only one EVSE with only one connector is supported by the binding for now.
 
-One configuration example is provided [here](afb-binding/etc/binding-josev-ac-sample.json).
+One configuration example is provided [here](afb-binding/etc/binding-josev-ac-sample.json). It depends on an environment variable ISO2_IFACE that gives the network interface on which Josev should attach itself to.
 
 ## MQTT extension configuration
 
@@ -33,7 +33,7 @@ The configuration file required by the MQTT extension so that bidirectionnal com
 Here is a pseudo command line for the invocation of the binding. Other required APIs are either imported through the use of `--ws-client` or loaded in the same security context (through `--config` and `--binding` options):
 
 ```
-afb-binder \
+ISO2_IFACE=eth2 afb-binder \
   --config=... \
   --ws-client=... \
   --config=$CONFDIR/../../etc/binding-debug.json \
