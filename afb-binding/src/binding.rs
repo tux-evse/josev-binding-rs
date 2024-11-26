@@ -210,6 +210,7 @@ fn on_subscribe(
 }
 
 fn mqtt_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Result<(), AfbError> {
+
     let msg = args.get::<JsoncObj>(0)?;
     let ctx: &SharedContext = ctx.get_ref::<SharedContext>()?;
     let config = &ctx.config;
@@ -220,12 +221,26 @@ fn mqtt_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Resu
     if ctx.config.evse_id != evse_id {
         return Ok(());
     }
-
     // Always authorize the session
     if let Ok(session_status) = msg.get::<&'static str>("session_status") {
         if session_status == "Authorization" {
             let ctx = ctx.shared.read().unwrap();
+            if let Ok(info) = msg.get::<JsoncObj>("info") {
+                if let Ok(selected_payment_option) = info.get::<&'static str>("selected_payment_option") {
 
+                    let iso_payment_option = match selected_payment_option {
+                        "EIM" => Some(ChargingMsg::Payment(PaymentOption::Eim)),
+                        "PNC" => Some(ChargingMsg::Payment(PaymentOption::Pnc)),
+                        _ => {
+                            return afb_error!(JOSEV_API, "Invalid Payment Option: {}", selected_payment_option);
+                        }
+                    };
+            
+                    if let Some(option) = iso_payment_option {
+                        AfbSubCall::call_sync(evt.get_apiv4(), config.charge_api, "payment-option", option)?;
+                    }
+                }          
+            }
             // Ask for authorization
             let auth_reply =
                 AfbSubCall::call_sync(evt.get_apiv4(), config.auth_api, "login", false)?;
@@ -248,6 +263,7 @@ fn mqtt_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Resu
             )?;
         }
     }
+
     Ok(())
 }
 
