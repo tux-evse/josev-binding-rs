@@ -231,12 +231,29 @@ fn mqtt_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Resu
                 AfbSubCall::call_sync(evt.get_apiv4(), config.auth_api, "login", false)?;
             let auth_state: &AuthState = auth_reply.get_onsuccess::<&AuthState>(0)?;
             if matches!(auth_state.auth, AuthMsg::Done) {
-                ctx.authorization_event.push(josev::AuthorizationUpdate {
-                    evse_id: evse_id.to_string(),
-                    token_type: josev::AuthorizationTokenType::KeyCode,
-                    status: josev::AuthorizationStatus::Accepted,
-                    id_token: Some(auth_state.tagid.clone()),
-                });
+                if auth_state.ocpp_check {
+                    // We ask josev for an authorization with this token.
+                    // It will be forwarded to OCPP
+                    AfbSubCall::call_sync(
+                        evt.get_apiv4(),
+                        "to_mqtt",
+                        "authorization",
+                        josev::AuthorizationRequest {
+                            evse_id: Some(evse_id.to_string()),
+                            id_token: Some(auth_state.tagid.clone()),
+                            token_type: josev::AuthorizationTokenType::ISO14443,
+                        },
+                    )?;
+                } else {
+                    // Otherwise, no OCPP is involved and we accept the authorization
+                    // by issuing an "update" Authorization message
+                    ctx.authorization_event.push(josev::AuthorizationUpdate {
+                        evse_id: evse_id.to_string(),
+                        token_type: josev::AuthorizationTokenType::ISO14443,
+                        status: josev::AuthorizationStatus::Accepted,
+                        id_token: Some(auth_state.tagid.clone()),
+                    });
+                }
             }
         } else if session_status == "SessionStop" {
             // Open the contactor

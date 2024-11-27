@@ -45,6 +45,22 @@ pub enum AuthorizationStatus {
     Deauthorized,
 }
 
+AfbDataConverter!(authorization_request, AuthorizationRequest);
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct AuthorizationRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evse_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id_token: Option<String>,
+    pub token_type: AuthorizationTokenType,
+}
+
+AfbDataConverter!(authorization_response, AuthorizationResponse);
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct AuthorizationResponse {
+    pub status: AuthorizationStatus,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, IntoStaticStr)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
@@ -223,10 +239,7 @@ pub struct PowerElectronicsSetpointResponse {
     pub status: SetPointRequestStatus,
 }
 
-AfbDataConverter!(
-    cs_status_and_limits_response,
-    CsStatusAndLimitsResponse
-);
+AfbDataConverter!(cs_status_and_limits_response, CsStatusAndLimitsResponse);
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct CsStatusAndLimitsResponse {
     pub evses: Vec<CsStatusAndLimitsEvse>,
@@ -325,10 +338,7 @@ pub enum CsStatusAndLimitsStatusCode {
     EvseMalfunction,
 }
 
-AfbDataConverter!(
-    cs_parameters_response,
-    CsParametersResponse
-);
+AfbDataConverter!(cs_parameters_response, CsParametersResponse);
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct CsParametersResponse {
     pub sw_version: String,
@@ -466,10 +476,11 @@ pub enum CsParametersGridCodeIslandingDetectionMode {
     Passive,
 }
 
-
 pub fn josev_registers() -> Result<(), AfbError> {
     // add binding custom converter
     authorization_update::register()?;
+    authorization_request::register()?;
+    authorization_response::register()?;
     cable_check_request::register()?;
     cable_check_response::register()?;
     cp_status_update::register()?;
