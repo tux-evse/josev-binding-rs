@@ -40,7 +40,7 @@ impl AfbApiControls for ApiUserData {
         AfbSubCall::call_sync(api, self.meter_api, "current", EnergyAction::SUBSCRIBE)?;
 
         // Reset authentication
-        if let Err(err) = AfbSubCall::call_sync(api, self.auth_api, "logout", 0) {
+        if let Err(_err) = AfbSubCall::call_sync(api, self.auth_api, "logout", 0) {
             afb_log_msg!(
                 Notice,
                 api.get_apiv4(),
@@ -52,6 +52,7 @@ impl AfbApiControls for ApiUserData {
         let subscribed_messages = JsoncObj::array();
         subscribed_messages.append("iso15118_state_info")?;
         subscribed_messages.append("hlc_charging")?;
+        subscribed_messages.append("transaction_status")?;
         AfbSubCall::call_sync(api, "from_mqtt", "subscribe_events", subscribed_messages)?;
         Ok(())
     }
@@ -299,6 +300,32 @@ fn on_hlc_charging(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Re
     Ok(())
 }
 
+fn on_transaction_status(
+    evt: &AfbEventMsg,
+    args: &AfbRqtData,
+    ctx: &AfbCtxData,
+) -> Result<(), AfbError> {
+    println!("== transaction status ==");
+    let msg = args.get::<JsoncObj>(0)?;
+    let ctx: &SharedContext = ctx.get_ref::<SharedContext>()?;
+    let config = &ctx.config;
+
+    if let Ok(evse_id) = msg.get::<&'static str>("evse_id") {
+        if let Ok(status) = msg.get::<&'static str>("status") {
+            if config.evse_id != evse_id {
+                // ignore messages of other EVSE IDs
+                return Ok(());
+            }
+
+            if status == "ended" {
+                // Close the contactor
+                AfbSubCall::call_sync(evt.get_apiv4(), config.charge_api, "remote_power", false)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn on_contactor_status(
     request: &AfbRequest,
     args: &AfbRqtData,
@@ -465,6 +492,14 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
         .set_context(shared_context.clone())
         .finalize()?;
 
+    let transaction_status_handler = AfbEvtHandler::new("transaction-status-evt")
+        .set_pattern(to_static_str(
+            "from_mqtt/event/transaction_status".to_owned(),
+        ))
+        .set_callback(on_transaction_status)
+        .set_context(shared_context.clone())
+        .finalize()?;
+
     let energy_evt_handler = AfbEvtHandler::new("energy-evt-handler")
         .set_pattern(to_static_str(format!("{}/*", meter_api)))
         .set_callback(energy_event_cb)
@@ -498,6 +533,7 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
     api.add_evt_handler(mqtt_handler);
     api.add_evt_handler(energy_evt_handler);
     api.add_evt_handler(hlc_charging_handler);
+    api.add_evt_handler(transaction_status_handler);
 
     api.add_verb(contactor_status_verb);
     api.add_verb(status_and_limits_verb);
