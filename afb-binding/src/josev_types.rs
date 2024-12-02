@@ -1,6 +1,7 @@
 use afbv4::prelude::*;
 use serde::{Deserialize, Serialize};
 use strum_macros::{Display, EnumString, IntoStaticStr};
+use time::OffsetDateTime;
 
 AfbDataConverter!(authorization_update, AuthorizationUpdate);
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -476,6 +477,138 @@ pub enum CsParametersGridCodeIslandingDetectionMode {
     Passive,
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct MeterValuesUpdateVoltage {
+    pub l1: f32,
+    pub l2: f32,
+    pub l3: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct MeterValuesUpdateCurrent {
+    pub l1: f32,
+    pub l2: f32,
+    pub l3: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct SignedMeterValuesUpdate {
+    pub measurand: SignedMeterValuesMeasurand,
+    pub signed_meter_data: String,
+    pub signing_method: String,
+    pub encoding_method: String,
+    pub public_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, IntoStaticStr, Copy)]
+pub enum SignedMeterValuesMeasurand {
+    #[serde(rename = "Current.Export")]
+    CurrentExport,
+    #[serde(rename = "Current.Import")]
+    CurrentImport,
+    #[serde(rename = "Current.Offered")]
+    CurrentOffered,
+    #[serde(rename = "Energy.Active.Export.Register")]
+    EnergyActiveExportRegister,
+    #[serde(rename = "Energy.Active.Import.Register")]
+    EnergyActiveImportRegister,
+    #[serde(rename = "Energy.Reactive.Export.Register")]
+    EnergyReactiveExportRegister,
+    #[serde(rename = "Energy.Reactive.Import.Register")]
+    EnergyReactiveImportRegister,
+    #[serde(rename = "Energy.Active.Export.Interval")]
+    EnergyActiveExportInterval,
+    #[serde(rename = "Energy.Active.Import.Interval")]
+    EnergyActiveImportInterval,
+    #[serde(rename = "Energy.Active.Net")]
+    EnergyActiveNet,
+    #[serde(rename = "Energy.Reactive.Export.Interval")]
+    EnergyReactiveExportInterval,
+    #[serde(rename = "Energy.Reactive.Import.Interval")]
+    EnergyReactiveImportInterval,
+    #[serde(rename = "Energy.Reactive.Net")]
+    EnergyReactiveNet,
+    #[serde(rename = "Energy.Apparent.Net")]
+    EnergyApparentNet,
+    #[serde(rename = "Energy.Apparent.Import")]
+    EnergyApparentImport,
+    #[serde(rename = "Energy.Apparent.Export")]
+    EnergyApparentExport,
+    #[serde(rename = "Frequency")]
+    Frequency,
+    #[serde(rename = "Power.Active.Export")]
+    PowerActiveExport,
+    #[serde(rename = "Power.Active.Import")]
+    PowerActiveImport,
+    #[serde(rename = "Power.Factor")]
+    PowerFactor,
+    #[serde(rename = "Power.Offered")]
+    PowerOffered,
+    #[serde(rename = "Power.Reactive.Export")]
+    PowerReactiveExport,
+    #[serde(rename = "Power.Reactive.Import")]
+    PowerReactiveImport,
+    SoC,
+    Voltage,
+}
+
+AfbDataConverter!(meter_values_request, MeterValuesRequest);
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct MeterValuesRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evse_id: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub timestamp: OffsetDateTime,
+}
+
+AfbDataConverter!(meter_values_response, MeterValuesResponse);
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct MeterValuesResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evse_id: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub timestamp: OffsetDateTime,
+    pub voltage: MeterValuesUpdateVoltage,
+    pub current: MeterValuesUpdateCurrent,
+    pub power_factor: f32, // TODO: 0 <= x <= 1
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dc_current: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dc_voltage: Option<f32>,
+    pub frequency: f32,
+    pub total_active_energy_imported: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_active_energy_exported: Option<f32>,
+    pub total_reactive_energy_imported: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_reactive_energy_exported: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub soc: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed_meter_values: Option<Vec<SignedMeterValuesUpdate>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, EnumString, Hash, Eq, Display, Copy)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum MessageStatus {
+    Accepted,
+    Rejected,
+}
+
+AfbDataConverter!(stop_charging_request, StopChargingRequest);
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct StopChargingRequest {
+    pub evse_id: String,
+}
+
+AfbDataConverter!(stop_charging_response, StopChargingResponse);
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct StopChargingResponse {
+    pub evse_id: String,
+    pub status: MessageStatus,
+}
+
 pub fn josev_registers() -> Result<(), AfbError> {
     // add binding custom converter
     authorization_update::register()?;
@@ -491,5 +624,9 @@ pub fn josev_registers() -> Result<(), AfbError> {
     power_electronics_setpoint_response::register()?;
     cs_status_and_limits_response::register()?;
     cs_parameters_response::register()?;
+    meter_values_request::register()?;
+    meter_values_response::register()?;
+    stop_charging_request::register()?;
+    stop_charging_response::register()?;
     Ok(())
 }

@@ -14,7 +14,6 @@ use std::sync::{Arc, RwLock};
 
 use crate::josev;
 use afbv4::prelude::*;
-use std::time;
 use typesv4::prelude::*;
 
 #[derive(Clone)]
@@ -22,7 +21,6 @@ pub struct ApiUserData {
     charge_api: &'static str,
     auth_api: &'static str,
     meter_api: &'static str,
-    meter_max_period_ms: i32,
 
     evse_id: String,
 }
@@ -34,10 +32,6 @@ impl AfbApiControls for ApiUserData {
 
         // Subscribe to IEC events
         AfbSubCall::call_sync(api, self.charge_api, "subscribe", true)?;
-
-        // Subscribe to energy meter
-        AfbSubCall::call_sync(api, self.meter_api, "tension", EnergyAction::SUBSCRIBE)?;
-        AfbSubCall::call_sync(api, self.meter_api, "current", EnergyAction::SUBSCRIBE)?;
 
         // Reset authentication
         if let Err(_err) = AfbSubCall::call_sync(api, self.auth_api, "logout", 0) {
@@ -73,7 +67,7 @@ struct Context {
     // current charging state
     charging_state: josev::ControlPilotState,
 
-    // curent contactor state
+    // current contactor state
     contactor_closed: bool,
 
     // static parameters of the charging station
@@ -82,7 +76,9 @@ struct Context {
     // current electrical state of the station
     cs_status_and_limits: josev::CsStatusAndLimitsResponse,
 
-    last_energy_update: Option<time::Instant>,
+    // for debugging
+    forced_charging_state: Option<josev::ControlPilotState>,
+    forced_contactor_closed: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -114,14 +110,16 @@ fn charge_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Re
                     }
                 }
 
-                ctx.cp_status_event.push(josev::CpStatusUpdate {
-                    evse_id: ctx.cs_parameters.parameters[0].evse_id.clone(),
-                    connector_id: ctx.cs_parameters.parameters[0].connectors[0].id,
-                    state: ctx.charging_state,
-                    max_voltage: None,
-                    min_voltage: None,
-                    duty_cycle: None,
-                });
+                if ctx.forced_charging_state.is_none() {
+                    ctx.cp_status_event.push(josev::CpStatusUpdate {
+                        evse_id: ctx.cs_parameters.parameters[0].evse_id.clone(),
+                        connector_id: ctx.cs_parameters.parameters[0].connectors[0].id,
+                        state: ctx.charging_state,
+                        max_voltage: None,
+                        min_voltage: None,
+                        duty_cycle: None,
+                    });
+                }
             }
             ChargingMsg::Power(power_state) => {
                 match *power_state {
@@ -133,57 +131,23 @@ fn charge_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Re
                     }
                     _ => {}
                 }
-                ctx.contactor_status_event
-                    .push(josev::CsContactorStatusUpdate {
-                        evse_id: ctx.cs_parameters.parameters[0].evse_id.clone(),
-                        status: {
-                            if ctx.contactor_closed {
-                                josev::CsContactorStatusResponseStatus::Closed
-                            } else {
-                                josev::CsContactorStatusResponseStatus::Opened
-                            }
-                        },
-                        info: None,
-                    });
+                if ctx.forced_contactor_closed.is_none() {
+                    ctx.contactor_status_event
+                        .push(josev::CsContactorStatusUpdate {
+                            evse_id: ctx.cs_parameters.parameters[0].evse_id.clone(),
+                            status: {
+                                if ctx.contactor_closed {
+                                    josev::CsContactorStatusResponseStatus::Closed
+                                } else {
+                                    josev::CsContactorStatusResponseStatus::Opened
+                                }
+                            },
+                            info: None,
+                        });
+                }
             }
             _ => {}
         }
-    }
-
-    Ok(())
-}
-
-fn energy_event_cb(
-    _evt: &AfbEventMsg,
-    args: &AfbRqtData,
-    ctx: &AfbCtxData,
-) -> Result<(), AfbError> {
-    let ctx: &mut SharedContext = ctx.get_mut::<SharedContext>()?;
-
-    {
-        // Do not update energy values too fast
-        let sctx = ctx.shared.read().unwrap();
-        if let Some(instant) = sctx.last_energy_update {
-            if instant.elapsed().as_millis() < ctx.config.meter_max_period_ms as u128 {
-                return Ok(());
-            }
-        }
-    }
-
-    let data: &MeterDataSet = args.get::<&MeterDataSet>(0)?;
-    {
-        let mut ctx = ctx.shared.write().unwrap();
-        match data.tag {
-            MeterTagSet::Tension => {
-                afb_log_msg!(Debug, _evt.get_apiv4(), "Received tension {}", data.total);
-            }
-            MeterTagSet::Current => {
-                afb_log_msg!(Debug, _evt.get_apiv4(), "Received current {}", data.total);
-            }
-            _ => {}
-        }
-
-        ctx.last_energy_update = Some(time::Instant::now());
     }
 
     Ok(())
@@ -289,7 +253,13 @@ fn on_hlc_charging(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Re
                 ctx.cp_status_event.push(josev::CpStatusUpdate {
                     evse_id: ctx.cs_parameters.parameters[0].evse_id.clone(),
                     connector_id: ctx.cs_parameters.parameters[0].connectors[0].id,
-                    state: ctx.charging_state,
+                    state: {
+                        if let Some(forced) = ctx.forced_charging_state {
+                            forced
+                        } else {
+                            ctx.charging_state
+                        }
+                    },
                     max_voltage: None,
                     min_voltage: None,
                     duty_cycle: None,
@@ -305,7 +275,6 @@ fn on_transaction_status(
     args: &AfbRqtData,
     ctx: &AfbCtxData,
 ) -> Result<(), AfbError> {
-    println!("== transaction status ==");
     let msg = args.get::<JsoncObj>(0)?;
     let ctx: &SharedContext = ctx.get_ref::<SharedContext>()?;
     let config = &ctx.config;
@@ -318,7 +287,7 @@ fn on_transaction_status(
             }
 
             if status == "ended" {
-                // Close the contactor
+                // Open the contactor
                 AfbSubCall::call_sync(evt.get_apiv4(), config.charge_api, "remote_power", false)?;
             }
         }
@@ -345,10 +314,18 @@ fn on_contactor_status(
         josev::CsContactorStatusResponse {
             evse_id: arg.evse_id.clone(),
             status: {
-                if ctx.contactor_closed {
-                    josev::CsContactorStatusResponseStatus::Closed
+                if let Some(closed) = ctx.forced_contactor_closed {
+                    if closed {
+                        josev::CsContactorStatusResponseStatus::Closed
+                    } else {
+                        josev::CsContactorStatusResponseStatus::Opened
+                    }
                 } else {
-                    josev::CsContactorStatusResponseStatus::Opened
+                    if ctx.contactor_closed {
+                        josev::CsContactorStatusResponseStatus::Closed
+                    } else {
+                        josev::CsContactorStatusResponseStatus::Opened
+                    }
                 }
             },
             info: None,
@@ -383,6 +360,158 @@ fn on_cs_parameters(
     Ok(())
 }
 
+fn on_stop_charging(
+    request: &AfbRequest,
+    args: &AfbRqtData,
+    ctx: &AfbCtxData,
+) -> Result<(), AfbError> {
+    let arg = args.get::<&josev::StopChargingRequest>(0)?;
+    let ctx: &SharedContext = ctx.get_ref::<SharedContext>()?;
+
+    {
+        let ctx = ctx.shared.read().unwrap();
+
+        if &ctx.cs_parameters.parameters[0].evse_id != &arg.evse_id {
+            // ignore requests for another EVSE ID
+            return Ok(());
+        }
+    }
+
+    // Open the contactor
+    AfbSubCall::call_sync(
+        request.get_apiv4(),
+        ctx.config.charge_api,
+        "remote_power",
+        false,
+    )?;
+
+    request.reply(
+        josev::StopChargingResponse {
+            evse_id: arg.evse_id.clone(),
+            status: josev::MessageStatus::Accepted,
+        },
+        0,
+    );
+    Ok(())
+}
+
+fn on_meter_values(
+    request: &AfbRequest,
+    args: &AfbRqtData,
+    ctx: &AfbCtxData,
+) -> Result<(), AfbError> {
+    afb_log_msg!(Debug, request.get_apiv4(), "METER_VALUES");
+    let ctx: &SharedContext = ctx.get_ref::<SharedContext>()?;
+    let config = &ctx.config;
+
+    let req: &josev::MeterValuesRequest = args.get::<&josev::MeterValuesRequest>(0)?;
+
+    // read voltage, current and total energy
+    let voltage = AfbSubCall::call_sync(
+        request.get_apiv4(),
+        config.meter_api,
+        "tension",
+        EnergyAction::READ,
+    )?;
+    let voltage: &MeterDataSet = voltage.get_onsuccess::<&MeterDataSet>(0)?;
+    let current = AfbSubCall::call_sync(
+        request.get_apiv4(),
+        config.meter_api,
+        "current",
+        EnergyAction::READ,
+    )?;
+    let current: &MeterDataSet = current.get_onsuccess::<&MeterDataSet>(0)?;
+    let energy = AfbSubCall::call_sync(
+        request.get_apiv4(),
+        config.meter_api,
+        "energy",
+        EnergyAction::READ,
+    )?;
+    let energy: &MeterDataSet = energy.get_onsuccess::<&MeterDataSet>(0)?;
+
+    let response = josev::MeterValuesResponse {
+        evse_id: req.evse_id.clone(),
+        timestamp: req.timestamp.clone(),
+        voltage: josev::MeterValuesUpdateVoltage {
+            l1: voltage.l1 as f32 / 1000.0,
+            l2: voltage.l2 as f32 / 1000.0,
+            l3: voltage.l3 as f32 / 1000.0,
+        },
+        current: josev::MeterValuesUpdateCurrent {
+            l1: current.l1 as f32 / 1000.0,
+            l2: current.l2 as f32 / 1000.0,
+            l3: current.l3 as f32 / 1000.0,
+        },
+        power_factor: 1.0,
+        dc_current: None,
+        dc_voltage: None,
+        frequency: 50.0,
+        total_active_energy_imported: energy.total as f32,
+        total_active_energy_exported: None,
+        total_reactive_energy_imported: 0.0,
+        total_reactive_energy_exported: None,
+        soc: None,
+        signed_meter_values: None,
+    };
+
+    request.reply(response, 0);
+    Ok(())
+}
+
+fn on_force_cp_state(
+    request: &AfbRequest,
+    args: &AfbRqtData,
+    ctx: &AfbCtxData,
+) -> Result<(), AfbError> {
+    afb_log_msg!(Debug, request.get_apiv4(), "METER_VALUES");
+    let ctx: &SharedContext = ctx.get_ref::<SharedContext>()?;
+
+    let arg: JsoncObj = args.get::<JsoncObj>(0)?;
+    if let Some(cp) = arg.optional::<&str>("cp")? {
+        let mut ctx = ctx.shared.write().unwrap();
+        match cp {
+            "A1" => ctx.forced_charging_state = Some(josev::ControlPilotState::A1),
+            "A2" => ctx.forced_charging_state = Some(josev::ControlPilotState::A2),
+            "B1" => ctx.forced_charging_state = Some(josev::ControlPilotState::B1),
+            "B2" => ctx.forced_charging_state = Some(josev::ControlPilotState::B2),
+            "C1" => ctx.forced_charging_state = Some(josev::ControlPilotState::C1),
+            "C2" => ctx.forced_charging_state = Some(josev::ControlPilotState::C2),
+            "E" => ctx.forced_charging_state = Some(josev::ControlPilotState::E),
+            "F" => ctx.forced_charging_state = Some(josev::ControlPilotState::F),
+            _ => {}
+        }
+
+        if let Some(charging_state) = ctx.forced_charging_state {
+            ctx.cp_status_event.push(josev::CpStatusUpdate {
+                evse_id: ctx.cs_parameters.parameters[0].evse_id.clone(),
+                connector_id: ctx.cs_parameters.parameters[0].connectors[0].id,
+                state: charging_state,
+                max_voltage: None,
+                min_voltage: None,
+                duty_cycle: None,
+            });
+        }
+    }
+    if let Some(closed) = arg.optional::<bool>("closed_contactor")? {
+        let mut ctx = ctx.shared.write().unwrap();
+        ctx.forced_contactor_closed = Some(closed);
+        ctx.contactor_status_event
+            .push(josev::CsContactorStatusUpdate {
+                evse_id: ctx.cs_parameters.parameters[0].evse_id.clone(),
+                status: {
+                    if closed {
+                        josev::CsContactorStatusResponseStatus::Closed
+                    } else {
+                        josev::CsContactorStatusResponseStatus::Opened
+                    }
+                },
+                info: None,
+            });
+    }
+
+    request.reply(AFB_NO_DATA, 0);
+    Ok(())
+}
 const JOSEV_API: &str = "josev";
 
 pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi, AfbError> {
@@ -428,14 +557,6 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
 
     let charging_state = josev::ControlPilotState::A1;
 
-    let meter_max_period_ms: i32 = {
-        if let Ok(value) = jconf.get("meter_max_period_ms") {
-            value
-        } else {
-            1000
-        }
-    };
-
     // copy evse_id as immutable configuration
     let evse_id = cs_parameters.parameters[0].evse_id.clone();
 
@@ -443,7 +564,6 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
         charge_api,
         auth_api,
         meter_api,
-        meter_max_period_ms,
         evse_id,
     };
 
@@ -459,7 +579,8 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
             cs_parameters,
             cs_status_and_limits,
             contactor_closed: false,
-            last_energy_update: None,
+            forced_charging_state: None,
+            forced_contactor_closed: None,
         })),
     };
 
@@ -500,12 +621,6 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
         .set_context(shared_context.clone())
         .finalize()?;
 
-    let energy_evt_handler = AfbEvtHandler::new("energy-evt-handler")
-        .set_pattern(to_static_str(format!("{}/*", meter_api)))
-        .set_callback(energy_event_cb)
-        .set_context(shared_context.clone())
-        .finalize()?;
-
     //
     // Verbs called by Josev
     //
@@ -525,19 +640,38 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
         .set_context(shared_context.clone())
         .finalize()?;
 
+    let meter_values_verb = AfbVerb::new("meter_values")
+        .set_callback(on_meter_values)
+        .set_context(shared_context.clone())
+        .finalize()?;
+
+    let stop_charging_verb = AfbVerb::new("stop_charging")
+        .set_callback(on_stop_charging)
+        .set_context(shared_context.clone())
+        .finalize()?;
+
+    // for debugging
+    let force_cp_state_verb = AfbVerb::new("force_cp_state")
+        .set_callback(on_force_cp_state)
+        .set_context(shared_context.clone())
+        .finalize()?;
+
     api.add_evt_handler(charge_handler);
     api.add_event(cp_status_event);
     api.add_event(authorization_event);
     api.add_event(contactor_status_event);
     api.add_verb(subscribe_verb);
     api.add_evt_handler(mqtt_handler);
-    api.add_evt_handler(energy_evt_handler);
     api.add_evt_handler(hlc_charging_handler);
     api.add_evt_handler(transaction_status_handler);
 
     api.add_verb(contactor_status_verb);
     api.add_verb(status_and_limits_verb);
     api.add_verb(cs_parameters_verb);
+    api.add_verb(meter_values_verb);
+    api.add_verb(stop_charging_verb);
+
+    api.add_verb(force_cp_state_verb);
 
     Ok(api.finalize()?)
 }
