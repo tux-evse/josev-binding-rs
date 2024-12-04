@@ -103,7 +103,7 @@ fn charge_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Re
             ChargingMsg::Plugged(plugged) => {
                 match *plugged {
                     PlugState::PlugIn => {
-                        ctx.charging_state = josev::ControlPilotState::B1;
+                        ctx.charging_state = josev::ControlPilotState::B2;
                     }
                     PlugState::Lock => {
                         ctx.charging_state = josev::ControlPilotState::C2;
