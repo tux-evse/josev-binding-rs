@@ -47,6 +47,7 @@ impl AfbApiControls for ApiUserData {
         subscribed_messages.append("iso15118_state_info")?;
         subscribed_messages.append("hlc_charging")?;
         subscribed_messages.append("transaction_status")?;
+        subscribed_messages.append("slac_status")?;
         AfbSubCall::call_sync(api, "from_mqtt", "subscribe_events", subscribed_messages)?;
         Ok(())
     }
@@ -175,7 +176,6 @@ fn on_subscribe(
 }
 
 fn mqtt_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Result<(), AfbError> {
-
     let msg = args.get::<JsoncObj>(0)?;
     let ctx: &SharedContext = ctx.get_ref::<SharedContext>()?;
     let config = &ctx.config;
@@ -191,20 +191,30 @@ fn mqtt_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Resu
         if session_status == "Authorization" {
             let ctx = ctx.shared.read().unwrap();
             if let Ok(info) = msg.get::<JsoncObj>("info") {
-                if let Ok(selected_payment_option) = info.get::<&'static str>("selected_payment_option") {
-
+                if let Ok(selected_payment_option) =
+                    info.get::<&'static str>("selected_payment_option")
+                {
                     let iso_payment_option = match selected_payment_option {
                         "EIM" => Some(ChargingMsg::Payment(PaymentOption::Eim)),
                         "PNC" => Some(ChargingMsg::Payment(PaymentOption::Pnc)),
                         _ => {
-                            return afb_error!(JOSEV_API, "Invalid Payment Option: {}", selected_payment_option);
+                            return afb_error!(
+                                JOSEV_API,
+                                "Invalid Payment Option: {}",
+                                selected_payment_option
+                            );
                         }
                     };
-            
+
                     if let Some(option) = iso_payment_option {
-                        AfbSubCall::call_sync(evt.get_apiv4(), config.charge_api, "payment-option", option)?;
+                        AfbSubCall::call_sync(
+                            evt.get_apiv4(),
+                            config.charge_api,
+                            "payment-option",
+                            option,
+                        )?;
                     }
-                }          
+                }
             }
             // Ask for authorization
             let auth_reply =
@@ -311,6 +321,32 @@ fn on_transaction_status(
     Ok(())
 }
 
+fn on_slac_status(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Result<(), AfbError> {
+    let msg: &josev::SlacStatusUpdate = args.get::<&josev::SlacStatusUpdate>(0)?;
+    let ctx: &SharedContext = ctx.get_ref::<SharedContext>()?;
+    let config = &ctx.config;
+
+    if msg.evse_id != config.evse_id {
+        // ignore messages of other EVSE IDs
+        return Ok(());
+    }
+
+    let slac_status = match msg.status {
+        josev::SlacStatusUpdateStatus::Unmatched => SlacStatus::UNMATCHED,
+        josev::SlacStatusUpdateStatus::Matched => SlacStatus::MATCHED,
+        josev::SlacStatusUpdateStatus::Matching => SlacStatus::MATCHING,
+        josev::SlacStatusUpdateStatus::Failed => SlacStatus::UNMATCHED,
+        josev::SlacStatusUpdateStatus::BasicCharging => SlacStatus::UNMATCHED,
+    };
+    AfbSubCall::call_sync(
+        evt.get_apiv4(),
+        config.charge_api,
+        "set_slac_status",
+        slac_status,
+    )?;
+    Ok(())
+}
+
 fn on_contactor_status(
     request: &AfbRequest,
     args: &AfbRqtData,
@@ -405,6 +441,33 @@ fn on_stop_charging(
         josev::StopChargingResponse {
             evse_id: arg.evse_id.clone(),
             status: josev::MessageStatus::Accepted,
+        },
+        0,
+    );
+    Ok(())
+}
+
+fn on_cp_pwm(request: &AfbRequest, args: &AfbRqtData, ctx: &AfbCtxData) -> Result<(), AfbError> {
+    let arg: &josev::CpPwmRequest = args.get::<&josev::CpPwmRequest>(0)?;
+    let ctx: &SharedContext = ctx.get_ref::<SharedContext>()?;
+
+    {
+        let ctx = ctx.shared.read().unwrap();
+
+        if &ctx.cs_parameters.parameters[0].evse_id != &arg.evse_id {
+            // ignore requests for another EVSE ID
+            return Ok(());
+        }
+    }
+
+    // CP PWM should be requested only for HLC (5% PWM)
+    // which is already taken care of by the M4 firmware
+    // So we always answer Valid here
+    request.reply(
+        josev::CpPwmResponse {
+            evse_id: arg.evse_id.clone(),
+            status: josev::CpPwmResponseStatus::Valid,
+            info: None,
         },
         0,
     );
@@ -537,6 +600,7 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
     auth_registers()?;
     chmgr_registers()?;
     engy_registers()?;
+    slac_registers()?;
     josev::josev_registers()?;
 
     let cs_parameters = jconf.get::<JsoncObj>("cs_parameters")?;
@@ -637,6 +701,12 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
         .set_context(shared_context.clone())
         .finalize()?;
 
+    let slac_status_handler = AfbEvtHandler::new("slac-status-evt")
+        .set_pattern(to_static_str("from_mqtt/event/slac_status".to_owned()))
+        .set_callback(on_slac_status)
+        .set_context(shared_context.clone())
+        .finalize()?;
+
     //
     // Verbs called by Josev
     //
@@ -666,6 +736,11 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
         .set_context(shared_context.clone())
         .finalize()?;
 
+    let cp_pwm_verb = AfbVerb::new("cp_pwm")
+        .set_callback(on_cp_pwm)
+        .set_context(shared_context.clone())
+        .finalize()?;
+
     // for debugging
     let force_cp_state_verb = AfbVerb::new("force_cp_state")
         .set_callback(on_force_cp_state)
@@ -680,12 +755,14 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
     api.add_evt_handler(mqtt_handler);
     api.add_evt_handler(hlc_charging_handler);
     api.add_evt_handler(transaction_status_handler);
+    api.add_evt_handler(slac_status_handler);
 
     api.add_verb(contactor_status_verb);
     api.add_verb(status_and_limits_verb);
     api.add_verb(cs_parameters_verb);
     api.add_verb(meter_values_verb);
     api.add_verb(stop_charging_verb);
+    api.add_verb(cp_pwm_verb);
 
     api.add_verb(force_cp_state_verb);
 

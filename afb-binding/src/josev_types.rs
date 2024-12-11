@@ -609,6 +609,54 @@ pub struct StopChargingResponse {
     pub status: MessageStatus,
 }
 
+AfbDataConverter!(slac_status_update, SlacStatusUpdate);
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct SlacStatusUpdate {
+    pub evse_id: String,
+    pub run_id: String,
+    pub status: SlacStatusUpdateStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, EnumString, Hash, Eq, Display, Copy)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum SlacStatusUpdateStatus {
+    Matching,
+    Failed,
+    Matched,
+    Unmatched,
+    BasicCharging,
+}
+
+AfbDataConverter!(cp_pwm_request, CpPwmRequest);
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct CpPwmRequest {
+    pub evse_id: String,
+    pub hlc: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current: Option<f32>, // TODO: constrain minimum 0, precision 1.d.p
+    pub error_state: bool,
+    pub fault_state: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, EnumString, Hash, Eq, Display, Copy)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum CpPwmResponseStatus {
+    Valid,
+    Invalid,
+    Error,
+}
+
+AfbDataConverter!(cp_pwm_response, CpPwmResponse);
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct CpPwmResponse {
+    pub evse_id: String,
+    pub status: CpPwmResponseStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub info: Option<String>,
+}
+
 pub fn josev_registers() -> Result<(), AfbError> {
     // add binding custom converter
     authorization_update::register()?;
@@ -628,5 +676,8 @@ pub fn josev_registers() -> Result<(), AfbError> {
     meter_values_response::register()?;
     stop_charging_request::register()?;
     stop_charging_response::register()?;
+    slac_status_update::register()?;
+    cp_pwm_request::register()?;
+    cp_pwm_response::register()?;
     Ok(())
 }

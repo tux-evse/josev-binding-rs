@@ -27,8 +27,12 @@ mod engy;
 #[path = "auth-types.rs"]
 mod auth;
 
+#[path = "slac-types.rs"]
+mod slac;
+
 pub mod prelude {
     pub use crate::chmgr::*;
     pub use crate::engy::*;
     pub use crate::auth::*;
+    pub use crate::slac::*;
 }
