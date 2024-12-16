@@ -98,11 +98,15 @@ fn charge_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Re
     afb_log_msg!(Debug, evt.get_apiv4(), "Charge event received {:?}", msg);
 
     {
+        let mut b1_b2_transition = false;
         let mut ctx = ctx.shared.write().unwrap();
         match msg {
             ChargingMsg::Plugged(plugged) => {
                 match *plugged {
                     PlugState::PlugIn => {
+                        if matches!(ctx.charging_state, josev::ControlPilotState::A1) {
+                            b1_b2_transition = true;
+                        }
                         ctx.charging_state = josev::ControlPilotState::B2;
                     }
                     PlugState::Lock => {
@@ -114,6 +118,18 @@ fn charge_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Re
                 }
 
                 if ctx.forced_charging_state.is_none() {
+                    if b1_b2_transition {
+                        // Moving from A1 to B2 is sometimes too extreme,
+                        // move first to B1 before moving to B2
+                        ctx.cp_status_event.push(josev::CpStatusUpdate {
+                            evse_id: ctx.cs_parameters.parameters[0].evse_id.clone(),
+                            connector_id: ctx.cs_parameters.parameters[0].connectors[0].id,
+                            state: josev::ControlPilotState::B1,
+                            max_voltage: None,
+                            min_voltage: None,
+                            duty_cycle: None,
+                        });                        
+                    }
                     ctx.cp_status_event.push(josev::CpStatusUpdate {
                         evse_id: ctx.cs_parameters.parameters[0].evse_id.clone(),
                         connector_id: ctx.cs_parameters.parameters[0].connectors[0].id,
