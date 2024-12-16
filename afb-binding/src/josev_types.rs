@@ -657,6 +657,154 @@ pub struct CpPwmResponse {
     pub info: Option<String>,
 }
 
+AfbDataConverter!(device_model_response, DeviceModelResponse);
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct DeviceModelResponse {
+    pub model: String,
+    pub vendor: String,
+    pub identity: String,
+    pub ocpp_csms_url: String,
+    pub security_profile: u8,
+    pub basic_auth_password: String,
+    pub serial_number: String,
+    pub firmware_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sim_iccid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sim_imsi: Option<String>,
+    pub evses: Vec<DeviceModelEvse>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default = "Vec::new")]
+    pub components: Vec<DeviceModelComponent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct DeviceModelEvse {
+    pub ocpp_id: u32,
+    pub iso15118_id: String,
+    pub power_kw: f32,
+    pub supply_phases: u32,
+    pub connectors: Vec<DeviceModelEvseConnector>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct DeviceModelEvseConnector {
+    pub id: u32,
+    pub connector_type: DeviceModelEvseConnectorType,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, EnumString, Hash, Eq, Display, Copy)]
+pub enum DeviceModelEvseConnectorType {
+    #[serde(rename = "cCCS1")]
+    #[strum(serialize = "cCCS1")]
+    CCcs1,
+    #[serde(rename = "cCCS2")]
+    #[strum(serialize = "cCCS2")]
+    CCcs2,
+    #[serde(rename = "cG105")]
+    #[strum(serialize = "cG105")]
+    CG105,
+    #[serde(rename = "cTesla")]
+    #[strum(serialize = "cTesla")]
+    CTesla,
+    #[serde(rename = "cType1")]
+    #[strum(serialize = "cType1")]
+    CType1,
+    #[serde(rename = "cType2")]
+    #[strum(serialize = "cType2")]
+    CType2,
+    #[serde(rename = "s309-1P-16A")]
+    #[strum(serialize = "s309-1P-16A")]
+    S3091P16A,
+    #[serde(rename = "s309-1P-32A")]
+    #[strum(serialize = "s309-1P-32A")]
+    S3091P32A,
+    #[serde(rename = "s309-3P-16A")]
+    #[strum(serialize = "s309-3P-16A")]
+    S3093P16A,
+    #[serde(rename = "s309-3P-32A")]
+    #[strum(serialize = "s309-3P-32A")]
+    S3093P32A,
+    #[serde(rename = "sBS1361")]
+    #[strum(serialize = "sBS1361")]
+    SBs1361,
+    #[serde(rename = "sCEE-7-7")]
+    #[strum(serialize = "sCEE-7-7")]
+    SCee77,
+    #[serde(rename = "sType2")]
+    #[strum(serialize = "sType2")]
+    SType2,
+    #[serde(rename = "sType3")]
+    #[strum(serialize = "sType3")]
+    SType3,
+    Other1PhMax16A,
+    Other1PhOver16A,
+    Other3Ph,
+    Pan,
+    #[serde(rename = "wInductive")]
+    #[strum(serialize = "wInductive")]
+    WInductive,
+    #[serde(rename = "wResonant")]
+    #[strum(serialize = "wResonant")]
+    WResonant,
+    Undetermined,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct DeviceModelComponent {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evse_id: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connector_id: Option<u32>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default = "Vec::new")]
+    pub variables: Vec<DeviceModelComponentVariable>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct DeviceModelComponentVariable {
+    pub name: String,
+    pub value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mutability: Option<DeviceModelComponentVariableMutability>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub constant: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_type: Option<DataType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub values_list: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, EnumString, Hash, Eq, Display, Copy)]
+pub enum DeviceModelComponentVariableMutability {
+    ReadOnly,
+    ReadWrite,
+    WriteOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, EnumString, Hash, Eq, Display, Copy)]
+pub enum DataType {
+    #[serde(rename = "string")]
+    String,
+    #[serde(rename = "decimal")]
+    Decimal,
+    #[serde(rename = "integer")]
+    Integer,
+    #[serde(rename = "dateTime")]
+    DateTime,
+    #[serde(rename = "boolean")]
+    Boolean,
+    OptionList,
+    SequenceList,
+    MemberList,
+}
+
 pub fn josev_registers() -> Result<(), AfbError> {
     // add binding custom converter
     authorization_update::register()?;
@@ -679,5 +827,6 @@ pub fn josev_registers() -> Result<(), AfbError> {
     slac_status_update::register()?;
     cp_pwm_request::register()?;
     cp_pwm_response::register()?;
+    device_model_response::register()?;
     Ok(())
 }
