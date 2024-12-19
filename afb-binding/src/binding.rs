@@ -77,6 +77,8 @@ struct Context {
     // current electrical state of the station
     cs_status_and_limits: josev::CsStatusAndLimitsResponse,
 
+    device_model: Option<josev::DeviceModelResponse>,
+
     // for debugging
     forced_charging_state: Option<josev::ControlPilotState>,
     forced_contactor_closed: Option<bool>,
@@ -96,11 +98,15 @@ fn charge_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Re
     afb_log_msg!(Debug, evt.get_apiv4(), "Charge event received {:?}", msg);
 
     {
+        let mut b1_b2_transition = false;
         let mut ctx = ctx.shared.write().unwrap();
         match msg {
             ChargingMsg::Plugged(plugged) => {
                 match *plugged {
                     PlugState::PlugIn => {
+                        if matches!(ctx.charging_state, josev::ControlPilotState::A1) {
+                            b1_b2_transition = true;
+                        }
                         ctx.charging_state = josev::ControlPilotState::B2;
                     }
                     PlugState::Lock => {
@@ -112,6 +118,18 @@ fn charge_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Re
                 }
 
                 if ctx.forced_charging_state.is_none() {
+                    if b1_b2_transition {
+                        // Moving from A1 to B2 is sometimes too extreme,
+                        // move first to B1 before moving to B2
+                        ctx.cp_status_event.push(josev::CpStatusUpdate {
+                            evse_id: ctx.cs_parameters.parameters[0].evse_id.clone(),
+                            connector_id: ctx.cs_parameters.parameters[0].connectors[0].id,
+                            state: josev::ControlPilotState::B1,
+                            max_voltage: None,
+                            min_voltage: None,
+                            duty_cycle: None,
+                        });                        
+                    }
                     ctx.cp_status_event.push(josev::CpStatusUpdate {
                         evse_id: ctx.cs_parameters.parameters[0].evse_id.clone(),
                         connector_id: ctx.cs_parameters.parameters[0].connectors[0].id,
@@ -412,6 +430,20 @@ fn on_cs_parameters(
     Ok(())
 }
 
+fn on_device_model(
+    request: &AfbRequest,
+    _args: &AfbRqtData,
+    ctx: &AfbCtxData,
+) -> Result<(), AfbError> {
+    afb_log_msg!(Debug, request.get_apiv4(), "DEVICE MODEL");
+    let ctx = ctx.get_ref::<SharedContext>()?;
+    let ctx = ctx.shared.read().unwrap();
+    if let Some(device_model) = ctx.device_model.clone() {
+        request.reply(device_model, 0);
+    }
+    Ok(())
+}
+
 fn on_stop_charging(
     request: &AfbRequest,
     args: &AfbRqtData,
@@ -627,6 +659,14 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
             afb_error!(JOSEV_API, "'cs_status_and_limits' malformed: {}", error)
         })?;
 
+    let device_model = jconf.optional::<JsoncObj>("device_model")?;
+    let device_model: Option<josev::DeviceModelResponse> = if device_model.is_some() {
+        serde_json::from_str(&device_model.unwrap().to_string())
+            .or_else(|error| afb_error!(JOSEV_API, "'device_model' malformed: {}", error))?
+    } else {
+        None
+    };
+
     let charge_api = jconf.get::<&'static str>("charge_api")?;
     let meter_api = jconf.get::<&'static str>("meter_api")?;
     let auth_api = jconf.get::<&'static str>("auth_api")?;
@@ -658,6 +698,7 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
             charging_state,
             cs_parameters,
             cs_status_and_limits,
+            device_model,
             contactor_closed: false,
             forced_charging_state: None,
             forced_contactor_closed: None,
@@ -726,6 +767,11 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
         .set_context(shared_context.clone())
         .finalize()?;
 
+    let device_model_verb = AfbVerb::new("device_model")
+        .set_callback(on_device_model)
+        .set_context(shared_context.clone())
+        .finalize()?;
+
     let meter_values_verb = AfbVerb::new("meter_values")
         .set_callback(on_meter_values)
         .set_context(shared_context.clone())
@@ -760,6 +806,7 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
     api.add_verb(contactor_status_verb);
     api.add_verb(status_and_limits_verb);
     api.add_verb(cs_parameters_verb);
+    api.add_verb(device_model_verb);
     api.add_verb(meter_values_verb);
     api.add_verb(stop_charging_verb);
     api.add_verb(cp_pwm_verb);
