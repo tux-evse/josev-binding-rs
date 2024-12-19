@@ -128,7 +128,7 @@ fn charge_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Re
                             max_voltage: None,
                             min_voltage: None,
                             duty_cycle: None,
-                        });                        
+                        });
                     }
                     ctx.cp_status_event.push(josev::CpStatusUpdate {
                         evse_id: ctx.cs_parameters.parameters[0].evse_id.clone(),
@@ -209,12 +209,15 @@ fn mqtt_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Resu
         if session_status == "Authorization" {
             let ctx = ctx.shared.read().unwrap();
             if let Ok(info) = msg.get::<JsoncObj>("info") {
+                // The keyword "selectedPaymentOption" in python version
+                // is different in the rust version ("selected_payment_option")
+                // So this part will only work in python-iso15118
                 if let Ok(selected_payment_option) =
-                    info.get::<&'static str>("selected_payment_option")
+                    info.get::<&'static str>("selectedPaymentOption")
                 {
-                    let iso_payment_option = match selected_payment_option {
-                        "EIM" => Some(ChargingMsg::Payment(PaymentOption::Eim)),
-                        "PNC" => Some(ChargingMsg::Payment(PaymentOption::Pnc)),
+                    let iso_payment_option = match selected_payment_option.to_lowercase().as_str() {
+                        "eim" => Some(ChargingMsg::Payment(PaymentOption::Eim)),
+                        "pnc" => Some(ChargingMsg::Payment(PaymentOption::Pnc)),
                         _ => {
                             return afb_error!(
                                 JOSEV_API,
