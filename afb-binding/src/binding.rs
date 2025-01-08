@@ -71,6 +71,9 @@ struct Context {
     // current contactor state
     contactor_closed: bool,
 
+    // selected payment mode of the charging session (EIM, PnC)
+    payment_option: Option<PaymentOption>,
+
     // static parameters of the charging station
     cs_parameters: josev::CsParametersResponse,
 
@@ -204,10 +207,9 @@ fn mqtt_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Resu
     if ctx.config.evse_id != evse_id {
         return Ok(());
     }
-    // Always authorize the session
+
     if let Ok(session_status) = msg.get::<&'static str>("session_status") {
         if session_status == "Authorization" {
-            let ctx = ctx.shared.read().unwrap();
             if let Ok(info) = msg.get::<JsoncObj>("info") {
                 // The keyword "selectedPaymentOption" in python version
                 // is different in the rust version ("selected_payment_option")
@@ -215,9 +217,9 @@ fn mqtt_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Resu
                 if let Ok(selected_payment_option) =
                     info.get::<&'static str>("selectedPaymentOption")
                 {
-                    let iso_payment_option = match selected_payment_option.to_lowercase().as_str() {
-                        "eim" => Some(ChargingMsg::Payment(PaymentOption::Eim)),
-                        "pnc" => Some(ChargingMsg::Payment(PaymentOption::Pnc)),
+                    let payment_option = match selected_payment_option.to_lowercase().as_str() {
+                        "eim" => PaymentOption::Eim,
+                        "pnc" => PaymentOption::Pnc,
                         _ => {
                             return afb_error!(
                                 JOSEV_API,
@@ -227,43 +229,56 @@ fn mqtt_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Resu
                         }
                     };
 
-                    if let Some(option) = iso_payment_option {
-                        AfbSubCall::call_sync(
-                            evt.get_apiv4(),
-                            config.charge_api,
-                            "payment-option",
-                            option,
-                        )?;
+                    {
+                        // store the payment mode in the context
+                        let mut ctx = ctx.shared.write().unwrap();
+                        ctx.payment_option = Some(payment_option);
                     }
-                }
-            }
-            // Ask for authorization
-            let auth_reply =
-                AfbSubCall::call_sync(evt.get_apiv4(), config.auth_api, "login", false)?;
-            let auth_state: &AuthState = auth_reply.get_onsuccess::<&AuthState>(0)?;
-            if matches!(auth_state.auth, AuthMsg::Done) {
-                if auth_state.ocpp_check {
-                    // We ask josev for an authorization with this token.
-                    // It will be forwarded to OCPP
+
                     AfbSubCall::call_sync(
                         evt.get_apiv4(),
-                        "to_mqtt",
-                        "authorization",
-                        josev::AuthorizationRequest {
-                            evse_id: Some(evse_id.to_string()),
-                            id_token: Some(auth_state.tagid.clone()),
-                            token_type: josev::AuthorizationTokenType::ISO14443,
-                        },
+                        config.charge_api,
+                        "payment-option",
+                        ChargingMsg::Payment(payment_option),
                     )?;
-                } else {
-                    // Otherwise, no OCPP is involved and we accept the authorization
-                    // by issuing an "update" Authorization message
-                    ctx.authorization_event.push(josev::AuthorizationUpdate {
-                        evse_id: evse_id.to_string(),
-                        token_type: josev::AuthorizationTokenType::ISO14443,
-                        status: josev::AuthorizationStatus::Accepted,
-                        id_token: Some(auth_state.tagid.clone()),
-                    });
+                }
+            }
+
+            {
+                let ctx = ctx.shared.read().unwrap();
+
+                // In EIM, we ectract from the smart card whether we need OCPP to authorize the user or not
+                // In PnC, we do nothing, Josev will forward the authorization request to the OCPP backend
+                if let Some(PaymentOption::Eim) = ctx.payment_option {
+                    // Ask for authorization
+                    let auth_reply =
+                        AfbSubCall::call_sync(evt.get_apiv4(), config.auth_api, "login", false)?;
+                    let auth_state: &AuthState = auth_reply.get_onsuccess::<&AuthState>(0)?;
+                    if matches!(auth_state.auth, AuthMsg::Done) {
+                        if auth_state.ocpp_check {
+                            // We ask josev for an authorization with this token.
+                            // It will be forwarded to OCPP
+                            AfbSubCall::call_sync(
+                                evt.get_apiv4(),
+                                "to_mqtt",
+                                "authorization",
+                                josev::AuthorizationRequest {
+                                    evse_id: Some(evse_id.to_string()),
+                                    id_token: Some(auth_state.tagid.clone()),
+                                    token_type: josev::AuthorizationTokenType::ISO14443,
+                                },
+                            )?;
+                        } else {
+                            // Otherwise, no OCPP is involved and we accept the authorization
+                            // by issuing an "update" Authorization message
+                            ctx.authorization_event.push(josev::AuthorizationUpdate {
+                                evse_id: evse_id.to_string(),
+                                token_type: josev::AuthorizationTokenType::ISO14443,
+                                status: josev::AuthorizationStatus::Accepted,
+                                id_token: Some(auth_state.tagid.clone()),
+                            });
+                        }
+                    }
                 }
             }
         } else if session_status == "SessionStop" {
@@ -703,6 +718,7 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
             cs_status_and_limits,
             device_model,
             contactor_closed: false,
+            payment_option: None,
             forced_charging_state: None,
             forced_contactor_closed: None,
         })),
