@@ -281,6 +281,15 @@ fn mqtt_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Resu
                     }
                 }
             }
+        } else if session_status == "ScheduleExchange" {
+            // In iso-20, the contactor must be closed before PowerDeliveryReq
+            // ScheduleExchange is the state just before PowerDelivery
+            AfbSubCall::call_sync(
+                evt.get_apiv4(),
+                ctx.config.charge_api,
+                "remote_power",
+                true,
+            )?;
         } else if session_status == "SessionStop" {
             // Open the contactor
             AfbSubCall::call_sync(
