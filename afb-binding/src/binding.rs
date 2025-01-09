@@ -102,7 +102,9 @@ fn charge_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Re
 
     {
         let mut b1_b2_transition = false;
+        let charge_api = ctx.config.charge_api;
         let mut ctx = ctx.shared.write().unwrap();
+        let old_charging_state = ctx.charging_state;
         match msg {
             ChargingMsg::Plugged(plugged) => {
                 match *plugged {
@@ -169,6 +171,18 @@ fn charge_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Re
                 }
             }
             _ => {}
+        }
+
+        if matches!(ctx.charging_state, josev::ControlPilotState::C2)
+            && !matches!(old_charging_state, josev::ControlPilotState::C2)
+        {
+            // Moving to C2 => close contactor
+            AfbSubCall::call_sync(evt.get_apiv4(), charge_api, "remote_power", true)?;
+        } else if !matches!(ctx.charging_state, josev::ControlPilotState::C2)
+            && !matches!(old_charging_state, josev::ControlPilotState::C2)
+        {
+            // Moving out of C2 => open contactor
+            AfbSubCall::call_sync(evt.get_apiv4(), charge_api, "remote_power", false)?;
         }
     }
 
