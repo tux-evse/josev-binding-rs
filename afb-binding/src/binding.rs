@@ -380,7 +380,7 @@ fn on_slac_status(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Res
         josev::SlacStatusUpdateStatus::Unmatched => SlacStatus::UNMATCHED,
         josev::SlacStatusUpdateStatus::Matched => SlacStatus::MATCHED,
         josev::SlacStatusUpdateStatus::Matching => SlacStatus::MATCHING,
-        josev::SlacStatusUpdateStatus::Failed => SlacStatus::UNMATCHED,
+        josev::SlacStatusUpdateStatus::Failed => SlacStatus::MATCHING,
         josev::SlacStatusUpdateStatus::BasicCharging => SlacStatus::TIMEOUT,
     };
     AfbSubCall::call_sync(
