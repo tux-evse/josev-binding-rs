@@ -45,6 +45,7 @@ impl AfbApiControls for ApiUserData {
         // Subscribe to MQTT iso15118_state_info (for authorization)
         let subscribed_messages = JsoncObj::array();
         subscribed_messages.append("iso15118_state_info")?;
+        subscribed_messages.append("iso15118_charge_limit")?;
         subscribed_messages.append("hlc_charging")?;
         subscribed_messages.append("transaction_status")?;
         subscribed_messages.append("slac_status")?;
@@ -71,6 +72,9 @@ struct Context {
 
     // current contactor state
     contactor_closed: bool,
+
+    // selected iso state
+    iso_state: Option<IsoState>,
 
     // selected payment mode of the charging session (EIM, PnC)
     payment_option: Option<PaymentOption>,
@@ -211,7 +215,35 @@ fn mqtt_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Resu
     }
 
     if let Ok(session_status) = msg.get::<&'static str>("session_status") {
-        if session_status == "Authorization" {
+        if session_status == "SupportedAppProtocol" {
+            // Parse SupportedAppProtocol to detect the iso state
+            if let Ok(info) = msg.get::<JsoncObj>("info") {
+                if let Ok(supported_protocol) =
+                    info.get::<&'static str>("protocol")
+                {
+                    let iso_state = match supported_protocol {
+                        "ISO_15118_2" => IsoState::Iso2,
+                        "ISO_15118_20_AC" => IsoState::Iso20,
+                        _ => {
+                            return Ok(());
+                        }
+                    };
+
+                    {
+                        // store the iso state in the context
+                        let mut ctx = ctx.shared.write().unwrap();
+                        ctx.iso_state = Some(iso_state);
+                    }
+                    
+                    AfbSubCall::call_sync(
+                        evt.get_apiv4(),
+                        config.charge_api,
+                        "iso-state",
+                        ChargingMsg::Iso(iso_state),
+                    )?;
+                }
+            }
+        } else if session_status == "Authorization" {
             if let Ok(info) = msg.get::<JsoncObj>("info") {
                 // The keyword "selectedPaymentOption" in python version
                 // is different in the rust version ("selected_payment_option")
@@ -377,6 +409,57 @@ fn on_transaction_status(
     }
     Ok(())
 }
+
+fn charge_limit_evt_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Result<(), AfbError> {
+
+    let msg = args.get::<JsoncObj>(0)?;
+    let ctx: &SharedContext = ctx.get_ref::<SharedContext>()?;
+    let config = &ctx.config;
+
+    if let Ok(evse_id) = msg.get::<&'static str>("evse_id") {
+        if let Ok(limit) = msg.get::<f64>("limit") {
+            if config.evse_id != evse_id {
+                // ignore messages of other EVSE IDs
+                return Ok(());
+            }
+            if limit < 0.0 {
+                let iso_state = IsoState::Iso20Discharge;
+                // store the iso state in the context
+                let mut ctx = ctx.shared.write().unwrap();
+                ctx.iso_state = Some(iso_state);
+
+                // Discharge case
+                AfbSubCall::call_sync(
+                    evt.get_apiv4(),
+                    config.charge_api,
+                    "iso-state",
+                    ChargingMsg::Iso(iso_state),
+                )?;
+            } else {
+                // if the limit set back to positive during discharge, push the iso20 state
+                let mut ctx = ctx.shared.write().unwrap();
+                if let Some(current_iso_state) = ctx.iso_state {        
+                    match current_iso_state {
+                        IsoState::Iso20Discharge => {
+                            let iso_state = IsoState::Iso20;
+                            ctx.iso_state = Some(iso_state); 
+                            // Charge case
+                            AfbSubCall::call_sync(
+                                evt.get_apiv4(),
+                                config.charge_api,
+                                "iso-state",
+                                ChargingMsg::Iso(iso_state),
+                            )?;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 
 fn on_slac_status(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Result<(), AfbError> {
     let msg: &josev::SlacStatusUpdate = args.get::<&josev::SlacStatusUpdate>(0)?;
@@ -742,6 +825,7 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
             cs_status_and_limits,
             device_model,
             contactor_closed: false,
+            iso_state: None,
             payment_option: None,
             forced_charging_state: None,
             forced_contactor_closed: None,
@@ -788,6 +872,12 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
     let slac_status_handler = AfbEvtHandler::new("slac-status-evt")
         .set_pattern(to_static_str("from_mqtt/event/slac_status".to_owned()))
         .set_callback(on_slac_status)
+        .set_context(shared_context.clone())
+        .finalize()?;
+
+    let charge_limit_handler = AfbEvtHandler::new("iso-charge-limit-evt")
+        .set_pattern(to_static_str("from_mqtt/event/iso15118_charge_limit".to_owned()))
+        .set_callback(charge_limit_evt_cb)
         .set_context(shared_context.clone())
         .finalize()?;
 
@@ -846,7 +936,8 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
     api.add_evt_handler(hlc_charging_handler);
     api.add_evt_handler(transaction_status_handler);
     api.add_evt_handler(slac_status_handler);
-
+    api.add_evt_handler(charge_limit_handler);
+    
     api.add_verb(contactor_status_verb);
     api.add_verb(status_and_limits_verb);
     api.add_verb(cs_parameters_verb);
