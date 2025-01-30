@@ -64,6 +64,7 @@ struct Context {
     cp_status_event: &'static AfbEvent,
     authorization_event: &'static AfbEvent,
     contactor_status_event: &'static AfbEvent,
+    cs_status_and_limits_event: &'static AfbEvent,
 
     // current charging state
     charging_state: josev::ControlPilotState,
@@ -190,6 +191,7 @@ fn on_subscribe(
         ctx.cp_status_event.subscribe(request)?;
         ctx.authorization_event.subscribe(request)?;
         ctx.contactor_status_event.subscribe(request)?;
+        ctx.cs_status_and_limits_event.subscribe(request)?;
     }
 
     request.reply(AFB_NO_DATA, 0);
@@ -244,52 +246,62 @@ fn mqtt_event_cb(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Resu
                 }
             }
 
-            {
+            // In EIM, we extract from the smart card whether we need OCPP to authorize the user or not
+            // In PnC, we do nothing, Josev will forward the authorization request to the OCPP backend
+            let payment_option = {
                 let ctx = ctx.shared.read().unwrap();
-
-                // In EIM, we ectract from the smart card whether we need OCPP to authorize the user or not
-                // In PnC, we do nothing, Josev will forward the authorization request to the OCPP backend
-                if let Some(PaymentOption::Eim) = ctx.payment_option {
-                    // Ask for authorization
-                    let auth_reply =
-                        AfbSubCall::call_sync(evt.get_apiv4(), config.auth_api, "login", false)?;
-                    let auth_state: &AuthState = auth_reply.get_onsuccess::<&AuthState>(0)?;
-                    if matches!(auth_state.auth, AuthMsg::Done) {
-                        if auth_state.ocpp_check {
-                            // We ask josev for an authorization with this token.
-                            // It will be forwarded to OCPP
-                            AfbSubCall::call_sync(
-                                evt.get_apiv4(),
-                                "to_mqtt",
-                                "authorization",
-                                josev::AuthorizationRequest {
-                                    evse_id: Some(evse_id.to_string()),
-                                    id_token: Some(auth_state.tagid.clone()),
-                                    token_type: josev::AuthorizationTokenType::ISO14443,
-                                },
-                            )?;
-                        } else {
-                            // Otherwise, no OCPP is involved and we accept the authorization
-                            // by issuing an "update" Authorization message
-                            ctx.authorization_event.push(josev::AuthorizationUpdate {
-                                evse_id: evse_id.to_string(),
-                                token_type: josev::AuthorizationTokenType::ISO14443,
-                                status: josev::AuthorizationStatus::Accepted,
-                                id_token: Some(auth_state.tagid.clone()),
-                            });
+                ctx.payment_option
+            };
+            if let Some(PaymentOption::Eim) = payment_option {
+                // Ask for authorization
+                let auth_reply =
+                    AfbSubCall::call_sync(evt.get_apiv4(), config.auth_api, "login", false)?;
+                let auth_state: &AuthState = auth_reply.get_onsuccess::<&AuthState>(0)?;
+                if matches!(auth_state.auth, AuthMsg::Done) {
+                    // Limit max current to the one stored on the card
+                    {
+                        let mut ctx = ctx.shared.write().unwrap();
+                        if let Some(ac_limits) = &mut ctx.cs_status_and_limits.evses[0].ac {
+                            ac_limits.max_current.l1 = auth_state.imax as f32;
+                            ac_limits.max_current.l2 = auth_state.imax as f32;
+                            ac_limits.max_current.l3 = auth_state.imax as f32;
                         }
+
+                        // Make Josev aware of the new current limitation
+                        ctx.cs_status_and_limits_event
+                            .push(ctx.cs_status_and_limits.clone());
+                    };
+
+                    if auth_state.ocpp_check {
+                        // We ask josev for an authorization with this token.
+                        // It will be forwarded to OCPP
+                        AfbSubCall::call_sync(
+                            evt.get_apiv4(),
+                            "to_mqtt",
+                            "authorization",
+                            josev::AuthorizationRequest {
+                                evse_id: Some(evse_id.to_string()),
+                                id_token: Some(auth_state.tagid.clone()),
+                                token_type: josev::AuthorizationTokenType::ISO14443,
+                            },
+                        )?;
+                    } else {
+                        let ctx = ctx.shared.read().unwrap();
+                        // Otherwise, no OCPP is involved and we accept the authorization
+                        // by issuing an "update" Authorization message
+                        ctx.authorization_event.push(josev::AuthorizationUpdate {
+                            evse_id: evse_id.to_string(),
+                            token_type: josev::AuthorizationTokenType::ISO14443,
+                            status: josev::AuthorizationStatus::Accepted,
+                            id_token: Some(auth_state.tagid.clone()),
+                        });
                     }
                 }
             }
         } else if session_status == "ScheduleExchange" {
             // In iso-20, the contactor must be closed before PowerDeliveryReq
             // ScheduleExchange is the state just before PowerDelivery
-            AfbSubCall::call_sync(
-                evt.get_apiv4(),
-                ctx.config.charge_api,
-                "remote_power",
-                true,
-            )?;
+            AfbSubCall::call_sync(evt.get_apiv4(), ctx.config.charge_api, "remote_power", true)?;
         } else if session_status == "SessionStop" {
             // Open the contactor
             AfbSubCall::call_sync(
@@ -650,6 +662,7 @@ fn on_force_cp_state(
     request.reply(AFB_NO_DATA, 0);
     Ok(())
 }
+
 const JOSEV_API: &str = "josev";
 
 pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi, AfbError> {
@@ -701,6 +714,7 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
     let cp_status_event = AfbEvent::new("cp_status");
     let authorization_event = AfbEvent::new("authorization");
     let contactor_status_event = AfbEvent::new("cs_contactor_status");
+    let cs_status_and_limits_event = AfbEvent::new("cs_status_and_limits");
 
     let charging_state = josev::ControlPilotState::A1;
 
@@ -722,6 +736,7 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
             cp_status_event,
             authorization_event,
             contactor_status_event,
+            cs_status_and_limits_event,
             charging_state,
             cs_parameters,
             cs_status_and_limits,
@@ -825,6 +840,7 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
     api.add_event(cp_status_event);
     api.add_event(authorization_event);
     api.add_event(contactor_status_event);
+    api.add_event(cs_status_and_limits_event);
     api.add_verb(subscribe_verb);
     api.add_evt_handler(mqtt_handler);
     api.add_evt_handler(hlc_charging_handler);
