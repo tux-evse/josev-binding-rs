@@ -16,6 +16,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: Install libjson-c
+      run: sudo apt install -y libjson-c-dev
     - name: Build
       run: cargo build --features afbv4 --verbose
     - name: Run tests
