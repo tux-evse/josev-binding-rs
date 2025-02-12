@@ -62,6 +62,7 @@ pub enum PlugState {
 #[serde(rename_all = "lowercase")]
 pub enum IsoState {
     Iso20,
+    Iso20Discharge,
     Iso2,
     Iso3,
     Iec,
