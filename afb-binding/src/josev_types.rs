@@ -805,6 +805,39 @@ pub enum DataType {
     MemberList,
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, EnumString, Hash, Eq, Display, Copy)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum ServiceStatusStatus {
+    Ready,
+    Starting,
+    Stopping,
+    Error,
+    Busy,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, EnumString, Hash, Eq, Display, Copy)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum Service {
+    Slac,
+    Iso15118,
+    Ocpp,
+    Gridcode,
+    SmartCharging,
+}
+
+
+AfbDataConverter!(service_status_update, ServiceStatusUpdate);
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct ServiceStatusUpdate {
+    pub service: Service,
+    pub software_version: String,
+    pub api_version: String,
+    pub status: ServiceStatusStatus,
+}
+
+
 pub fn josev_registers() -> Result<(), AfbError> {
     // add binding custom converter
     authorization_update::register()?;
@@ -828,5 +861,6 @@ pub fn josev_registers() -> Result<(), AfbError> {
     cp_pwm_request::register()?;
     cp_pwm_response::register()?;
     device_model_response::register()?;
+    service_status_update::register()?;
     Ok(())
 }

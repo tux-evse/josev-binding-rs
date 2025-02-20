@@ -49,6 +49,7 @@ impl AfbApiControls for ApiUserData {
         subscribed_messages.append("hlc_charging")?;
         subscribed_messages.append("transaction_status")?;
         subscribed_messages.append("slac_status")?;
+        subscribed_messages.append("service_status")?;
         AfbSubCall::call_sync(api, "from_mqtt", "subscribe_events", subscribed_messages)?;
         Ok(())
     }
@@ -487,6 +488,37 @@ fn on_slac_status(evt: &AfbEventMsg, args: &AfbRqtData, ctx: &AfbCtxData) -> Res
     Ok(())
 }
 
+fn on_service_status(
+    evt: &AfbEventMsg,
+    args: &AfbRqtData,
+    ctx: &AfbCtxData,
+) -> Result<(), AfbError> {
+    let msg: &josev::ServiceStatusUpdate = args.get::<&josev::ServiceStatusUpdate>(0)?;
+    let ctx: &SharedContext = ctx.get_ref::<SharedContext>()?;
+    let config = &ctx.config;
+
+    let service_str = msg.service.to_string();
+
+    let status = match msg.status {
+        josev::ServiceStatusStatus::Ready => ServiceStatus::Ready,
+        josev::ServiceStatusStatus::Starting => ServiceStatus::Starting,
+        josev::ServiceStatusStatus::Stopping => ServiceStatus::Stopping,
+        josev::ServiceStatusStatus::Error => ServiceStatus::Error,
+        josev::ServiceStatusStatus::Busy => ServiceStatus::Error,
+    };
+
+    let mut args = AfbParams::new();
+    args.push(service_str)?;
+    args.push(status)?;
+    AfbSubCall::call_sync(
+        evt.get_apiv4(),
+        config.charge_api,
+        "set-service-status",
+        args,
+    )?;
+    Ok(())
+}
+
 fn on_contactor_status(
     request: &AfbRequest,
     args: &AfbRqtData,
@@ -881,6 +913,12 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
         .set_context(shared_context.clone())
         .finalize()?;
 
+    let service_status_handler = AfbEvtHandler::new("service-status-evt")
+        .set_pattern(to_static_str("from_mqtt/event/service_status".to_owned()))
+        .set_callback(on_service_status)
+        .set_context(shared_context.clone())
+        .finalize()?;
+
     //
     // Verbs called by Josev
     //
@@ -937,7 +975,7 @@ pub fn binding_init(rootv4: AfbApiV4, jconf: JsoncObj) -> Result<&'static AfbApi
     api.add_evt_handler(transaction_status_handler);
     api.add_evt_handler(slac_status_handler);
     api.add_evt_handler(charge_limit_handler);
-    
+    api.add_evt_handler(service_status_handler);
     api.add_verb(contactor_status_verb);
     api.add_verb(status_and_limits_verb);
     api.add_verb(cs_parameters_verb);
